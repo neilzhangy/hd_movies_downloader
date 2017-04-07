@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 #author     : Neil Zhang
-#email      : yuan.zhang@hpe.com
+#email      : snailless@gmail.com
 #version    : 1.4
 
 #----change logs----
