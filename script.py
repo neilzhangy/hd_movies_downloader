@@ -11,6 +11,7 @@
 # 2016-12-05    v1.2    Delete all files less then 500MB.
 # 2017-01-11    v1.3    Separate jobs into different folders.
 # 2017-04-06    v1.4    Rewrite to delete none movie files and folder automatically. Rename movie files automatically.
+# 2017-04-08    v1.5    Fixed a bug which got wrong result when adding tasks manally
 
 
 
@@ -31,7 +32,7 @@ DOWN_FILE = './to_download'
 TABLE_NAME = 'MOVIES'
 FIRST_RUN = False
 MOVIE_INFO = {}
-CURL_CMD = 'curl -k --connect-timeout 20 --max-time 20 --resolve thepiratebay.org:443:104.27.217.28 -o %s https://thepiratebay.org/top/207' % WEB_FILE
+CURL_CMD = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 --resolve thepiratebay.org:443:104.27.217.28 -o %s https://thepiratebay.org/top/207' % WEB_FILE
 MOVIE_FILE_THRESHOLD = 500*1024*1024
 
 
@@ -133,7 +134,9 @@ def DelOldTasks(tc, base_dir):
         if torrent.status=='seeding' or torrent.status=='stopped':
             hash = torrent.hashString
             path = torrent.downloadDir
-            print 'Download dir is %s' % path
+            print 'Download dir is [%s], base dir is [%s]' % (path, base_dir)
+            if os.path.samefile(path, base_dir):
+                continue            
             try:
                 dir_to_del = []
                 for root, dirs, files in os.walk(path):
