@@ -2,7 +2,7 @@
 
 #author     : Neil Zhang
 #email      : snailless@gmail.com
-#version    : 1.4
+#version    : 1.6
 
 #----change logs----
 #
@@ -11,8 +11,8 @@
 # 2016-12-05    v1.2    Delete all files less then 500MB.
 # 2017-01-11    v1.3    Separate jobs into different folders.
 # 2017-04-06    v1.4    Rewrite to delete none movie files and folder automatically. Rename movie files automatically.
-# 2017-04-08    v1.5    Fixed a bug which got wrong result when adding tasks manally
-
+# 2017-04-08    v1.5    Fixed a bug which got wrong result when adding tasks manally.
+# 2017-04-14    v1.6    Fixed a bug which will create a folder with 8 characters only.
 
 
 import sys
@@ -173,7 +173,7 @@ def PostNewTasks(tc, base_dir):
     print 'Posting new tasks to transmission...'
     #i = 3   #only open when debuging
     for (k,v) in MOVIE_INFO.items():
-        dir_to_down = os.path.join(base_dir, k)
+        dir_to_down = os.path.join(base_dir, k).rstrip()
         print 'Creating download dir [%s]' % dir_to_down
         try:
             os.mkdir(dir_to_down)
