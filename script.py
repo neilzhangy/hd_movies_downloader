@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 #author     : Neil Zhang
-#email      : snailless@gmail.com
-#version    : 1.6
+#email      : neilzhangy@gmail.com
+#version    : 1.7
 
 #----change logs----
 #
@@ -12,7 +12,8 @@
 # 2017-01-11    v1.3    Separate jobs into different folders.
 # 2017-04-06    v1.4    Rewrite to delete none movie files and folder automatically. Rename movie files automatically.
 # 2017-04-08    v1.5    Fixed a bug which got wrong result when adding tasks manally.
-# 2017-04-14    v1.6    Fixed a bug which will create a folder with 8 characters only.
+# 2017-04-14    v1.6    Fixed a bug which created a folder with 8 characters only.
+# 2017-04-16    v1.7    Fixed a bug which exited when folder removed manally.
 
 
 import sys
@@ -134,10 +135,10 @@ def DelOldTasks(tc, base_dir):
         if torrent.status=='seeding' or torrent.status=='stopped':
             hash = torrent.hashString
             path = torrent.downloadDir
-            print 'Download dir is [%s], base dir is [%s]' % (path, base_dir)
-            if os.path.samefile(path, base_dir):
-                continue            
+            print 'Download dir is [%s], base dir is [%s]' % (path, base_dir)               
             try:
+                if os.path.samefile(path, base_dir):
+                    continue    
                 dir_to_del = []
                 for root, dirs, files in os.walk(path):
                     for file in files:
@@ -162,8 +163,7 @@ def DelOldTasks(tc, base_dir):
                     print 'Remove dir %s' % dir
             except:
                 print 'Got error when trying to walk path %s' % path
-                raise
-                return
+                continue
             tc.remove_torrent(hash)
             print 'Remove torrent: %s' % hash
                 
