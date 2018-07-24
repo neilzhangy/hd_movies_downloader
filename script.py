@@ -2,7 +2,7 @@
 
 #author     : Neil Zhang
 #email      : neilzhangy@gmail.com
-#version    : 1.7
+#version    : 1.8
 
 #----change logs----
 #
@@ -14,6 +14,7 @@
 # 2017-04-08    v1.5    Fixed a bug which got wrong result when adding tasks manally.
 # 2017-04-14    v1.6    Fixed a bug which created a folder with 8 characters only.
 # 2017-04-16    v1.7    Fixed a bug which exited when folder removed manally.
+# 2018-07-24    v1.8    Test new way to get movies.
 
 
 import sys
@@ -33,7 +34,7 @@ DOWN_FILE = './to_download'
 TABLE_NAME = 'MOVIES'
 FIRST_RUN = False
 MOVIE_INFO = {}
-CURL_CMD = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 --resolve thepiratebay.org:443:104.27.217.28 -o %s https://thepiratebay.org/top/207' % WEB_FILE
+CURL_CMD = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 --resolve thepiratebay.org:443:104.27.217.28 -o %s https://thepiratebay.org/browse/207/%d/7'
 MOVIE_FILE_THRESHOLD = 500*1024*1024
 
 
@@ -54,31 +55,36 @@ def DownloadFilter(name):
     localtime = time.localtime(time.time())
     this_year = str(localtime.tm_year)
     last_year = str(localtime.tm_year - 1)
-    print 'Filter: this year is %s, last year is %s' % (this_year, last_year)
+    #print 'Filter: this year is %s, last year is %s' % (this_year, last_year)
     
     #time filter, only this year and last year
-    ret = name.find(this_year)
-    if -1 == ret:
-        ret = name.find(last_year)
-        if -1 == ret:
-            return False    
+    if -1 == name.find(this_year) and -1 == name.find(last_year):
+        return False    
         
-    #imdb filter
+    #720P and 1080P filter
+    if -1 == name.find('1080'):
+        return False    
     
     return True
 
-def LoadFromWeb(cursor, conn):
-    print 'Running %s' % CURL_CMD
-    ret = os.system(CURL_CMD)
-    if 0 != ret:
-        print 'Run cmd got an error:%d, exit.' % ret
-        sys.exit(1)
+def GetWebData(file_name):
+    for i in range(4):
+        cmd = CURL_CMD % (file_name+str(i), i)
+        print 'Running %s' % cmd
+        ret = os.system(cmd)
+        if 0 != ret:
+            print 'Run cmd got an error:%d' % ret
+            sys.exit(1)
     print 'Running cmd successfully.'
-    
+
+def AnalyseWebData(cursor, conn, file_name):
     print 'Analysing response...'
-    if os.path.exists(WEB_FILE):
-        with open(WEB_FILE, 'r') as f:
-            data = f.read()
+    data = ''
+    for i in range(4):
+        if os.path.exists(file_name+str(i)):
+            with open(file_name+str(i), 'r') as f:
+                content = f.read()
+        data += content
     
     pos = 0
     while(True):
@@ -260,9 +266,12 @@ if __name__ == '__main__':
         
     #init
     conn, cursor = DbInit()
+
+    #Get web page data
+    GetWebData(WEB_FILE)
     
-    #load from web
-    LoadFromWeb(cursor, conn)
+    #analyse web data
+    AnalyseWebData(cursor, conn, WEB_FILE)
     
     #write movies name and url to file
     WriteToFile()
