@@ -24,6 +24,7 @@ import string
 import sqlite3
 import time
 import shutil
+import transmissionrpc
 
 USAGE = """Usage: ./download_hd_movies.py [-f]
     -f Use this option when first running this script
