@@ -2,7 +2,7 @@
 
 #author     : Neil Zhang
 #email      : neilzhangy@gmail.com
-#version    : 2.0
+#version    : 2.2
 
 #----change logs----
 #
@@ -16,6 +16,8 @@
 # 2017-04-16    v1.7    Fixed a bug which exited when folder removed manally.
 # 2018-09-23    v1.9    Use new piratebay url and ip address.
 # 2018-09-23    v2.0    Get movies from top100 and most seeders.
+# 2020-08-09    v2.1    Use custome ip and port.
+# 2020-10-10    v2.2    Can work without python lib transmissionrpc; Add -p option to print out all data in the DB.
 
 
 import sys
@@ -24,10 +26,18 @@ import string
 import sqlite3
 import time
 import shutil
-import transmissionrpc
+
+USE_TRANSMISSION_RPC = True
+
+try:
+    import transmissionrpc
+except:
+    print 'Importing transmissionrpc failed, skip this function, only get list and put into DB.'
+    USE_TRANSMISSION_RPC = False
 
 USAGE = """Usage: ./download_hd_movies.py [-f]
     -f Use this option when first running this script
+    -p Print out what's inside DB
 """
 WEB_FILE = './web_data'
 DB_FILE = './movies.db'
@@ -35,9 +45,11 @@ DOWN_FILE = './to_download'
 TABLE_NAME = 'MOVIES'
 FIRST_RUN = False
 MOVIE_INFO = {}
-CURL_CMD_TOP = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://thepiratebay3.org/?url=https://thepiratebay.rocks/top/207' % WEB_FILE
-CURL_CMD_SEEDERS = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://thepiratebay3.org/?url=https://thepiratebay.rocks/browse/207/1/7/0' % WEB_FILE
+CURL_CMD_TOP = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://tpb.party/top/207' % WEB_FILE
+CURL_CMD_SEEDERS = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://tpb.party/browse/207/1/7/0' % WEB_FILE
 MOVIE_FILE_THRESHOLD = 500*1024*1024
+TRANSMISSION_IP = '192.168.0.127'
+TRANSMISSION_PORT = 9999
 
 
 def NameConvert(name):
@@ -51,13 +63,13 @@ def NameConvert(name):
             ret.append(' ')
             flag = False
 
-    return ''.join(ret)
+    return ''.join(ret).strip()
     
 def DownloadFilter(name):
     localtime = time.localtime(time.time())
     this_year = str(localtime.tm_year)
     last_year = str(localtime.tm_year - 1)
-    print 'Filter: this year is %s, last year is %s' % (this_year, last_year)
+    #print 'Filter: this year is %s, last year is %s' % (this_year, last_year)
     
     #time filter, only this year and last year
     ret = name.find(this_year)
@@ -117,10 +129,14 @@ def LoadFromWeb(cursor, conn, cmd):
                 break
                 
         if not found:
-            cursor.execute("INSERT INTO %s VALUES ('%s', '%s')" % (TABLE_NAME, name, url))
-            conn.commit()
-            if False==FIRST_RUN and True==DownloadFilter(name):
-                MOVIE_INFO[name] = url
+            if DownloadFilter(name):
+                cursor.execute("INSERT INTO %s VALUES ('%s', '%s')" % (TABLE_NAME, name, url))
+                conn.commit()
+                print 'Found new movie [%s]' % name
+                if FIRST_RUN:
+                    pass
+                else:            
+                    MOVIE_INFO[name] = url
 
     print 'Analyse response successfully.'
         
@@ -130,8 +146,8 @@ def WriteToFile():
         for (k,v) in MOVIE_INFO.items():
             f.write(k + '\n')
             f.write(v + '\n')
-            print '[%s]' % k
-    print 'Total number : %d' % len(MOVIE_INFO)
+            #print '[%s]' % k
+    print 'Total number: %d' % len(MOVIE_INFO)
     
 def DelOldTasks(tc, base_dir):
     print 'Delete old tasks...'
@@ -196,9 +212,10 @@ def PostNewTasks(tc, base_dir):
     
 def TackleTransmission():
     print 'Tackling transmissions...'
-    tc = transmissionrpc.Client('localhost', port=9999)
+    tc = transmissionrpc.Client(TRANSMISSION_IP, port=TRANSMISSION_PORT)
     session = tc.get_session()
     download_dir = session.download_dir
+    print 'Download dir is:%s' % download_dir
     if True==os.path.exists(download_dir):
         DelOldTasks(tc, download_dir)
         PostNewTasks(tc, download_dir)
@@ -252,6 +269,20 @@ def DbDeInit(conn, cursor):
             conn.close()
     print 'Cleanup done.'
 
+def PrintDB():
+    #init
+    conn, cursor = DbInit()
+
+    #print all
+    counter = 0
+    ret = cursor.execute("SELECT name from %s" % TABLE_NAME)
+    for i in ret:
+        print '%d exist movie [%s]' % (counter, i[0])
+        counter += 1
+
+    #clean up
+    DbDeInit(conn, cursor)
+
 if __name__ == '__main__':
     argv_len = len(sys.argv)
     if argv_len > 2:
@@ -264,6 +295,10 @@ if __name__ == '__main__':
         
     if (argv_len == 2 and sys.argv[1].strip().lower() == '-f'):
         FIRST_RUN = True
+
+    if (argv_len == 2 and sys.argv[1].strip().lower() == '-p'):
+        PrintDB()
+        sys.exit(0)
         
     #init
     conn, cursor = DbInit()
@@ -276,12 +311,14 @@ if __name__ == '__main__':
     WriteToFile()
     
     #tackle transmission
-    TackleTransmission()
+    if USE_TRANSMISSION_RPC:
+        TackleTransmission()
     
     #clean up
     DbDeInit(conn, cursor)
     
     sys.exit(0)
+
 
 
 
