@@ -1,8 +1,8 @@
-#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 #author     : Neil Zhang
 #email      : neilzhangy@gmail.com
-#version    : 2.2
+#version    : 3.0
 
 #----change logs----
 #
@@ -18,6 +18,7 @@
 # 2018-09-23    v2.0    Get movies from top100 and most seeders.
 # 2020-08-09    v2.1    Use custome ip and port.
 # 2020-10-10    v2.2    Can work without python lib transmissionrpc; Add -p option to print out all data in the DB.
+# 2020-10-16    v3.0    Add subtitle download
 
 
 import sys
@@ -26,13 +27,14 @@ import string
 import sqlite3
 import time
 import shutil
+from sub import *
 
 USE_TRANSMISSION_RPC = True
 
 try:
     import transmissionrpc
 except:
-    print 'Importing transmissionrpc failed, skip this function, only get list and put into DB.'
+    DebugLog('Importing transmissionrpc failed, skip this function, only get list and put into DB.')
     USE_TRANSMISSION_RPC = False
 
 USAGE = """Usage: ./download_hd_movies.py [-f]
@@ -48,6 +50,7 @@ MOVIE_INFO = {}
 CURL_CMD_TOP = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://tpb.party/top/207' % WEB_FILE
 CURL_CMD_SEEDERS = 'curl -k --retry 10 --connect-timeout 20 --max-time 20 -o %s https://tpb.party/browse/207/1/7/0' % WEB_FILE
 MOVIE_FILE_THRESHOLD = 500*1024*1024
+MOVIE_FILE_EXTS = ['mkv', 'mp4', 'avi']
 TRANSMISSION_IP = '192.168.0.127'
 TRANSMISSION_PORT = 9999
 
@@ -69,7 +72,7 @@ def DownloadFilter(name):
     localtime = time.localtime(time.time())
     this_year = str(localtime.tm_year)
     last_year = str(localtime.tm_year - 1)
-    #print 'Filter: this year is %s, last year is %s' % (this_year, last_year)
+    #DebugLog('Filter: this year is %s, last year is %s' % (this_year, last_year))
     
     #time filter, only this year and last year
     ret = name.find(this_year)
@@ -87,14 +90,14 @@ def DownloadFilter(name):
     return True
 
 def LoadFromWeb(cursor, conn, cmd):
-    print 'Running %s' % cmd
+    DebugLog('Running %s' % cmd)
     ret = os.system(cmd)
     if 0 != ret:
-        print 'Run cmd got an error:%d, exit.' % ret
+        DebugLog('Run cmd got an error:%d, exit.' % ret)
         sys.exit(1)
-    print 'Running cmd successfully.'
+    DebugLog('Running cmd successfully.')
     
-    print 'Analysing response...'
+    DebugLog('Analysing response...')
     if os.path.exists(WEB_FILE):
         with open(WEB_FILE, 'r') as f:
             data = f.read()
@@ -132,108 +135,128 @@ def LoadFromWeb(cursor, conn, cmd):
             if DownloadFilter(name):
                 cursor.execute("INSERT INTO %s VALUES ('%s', '%s')" % (TABLE_NAME, name, url))
                 conn.commit()
-                print 'Found new movie [%s]' % name
+                DebugLog('Found new movie [%s]' % name)
                 if FIRST_RUN:
                     pass
                 else:            
                     MOVIE_INFO[name] = url
 
-    print 'Analyse response successfully.'
+    DebugLog('Analyse response successfully.')
         
 def WriteToFile():
-    print 'Writing tasks to file...'
+    DebugLog('Writing tasks to file...')
     with open(DOWN_FILE, 'w') as f:
         for (k,v) in MOVIE_INFO.items():
             f.write(k + '\n')
             f.write(v + '\n')
-            #print '[%s]' % k
-    print 'Total number: %d' % len(MOVIE_INFO)
-    
-def DelOldTasks(tc, base_dir):
-    print 'Delete old tasks...'
+    DebugLog('Total number: %d' % len(MOVIE_INFO))
+
+def GetSubtitles():
+    localtime = time.localtime(time.time())
+    this_year = str(localtime.tm_year)
+    last_year = str(localtime.tm_year - 1)
+    for (k,v) in MOVIE_INFO.items():
+        pos = k.find(this_year)
+        if -1 == pos:
+            pos == k.find(last_year)
+            if -1 == pos:
+                continue
+        search_name = k[:pos+4]
+        DebugLog('Search name: %s' % search_name)
+        results = Search(search_name)
+        ordered_list = SlectSubtitle(results)
+        for item in ordered_list:
+            if Download(item, './', search_name):
+                DebugLog('Succeed to download subtitle, all done.')
+                continue
+        DebugLog('Failed to download subtitle, all done.')
+
+#get all finished jobs from transmissionrpc
+def GetFinishedTorrents(tc):
+    results = []
     torrents_list = tc.get_torrents()
-    
     for torrent in torrents_list:
-        print torrent.downloadDir
         if torrent.status=='seeding' or torrent.status=='stopped':
             hash = torrent.hashString
             path = torrent.downloadDir
-            print 'Download dir is [%s], base dir is [%s]' % (path, base_dir)               
-            try:
-                if os.path.samefile(path, base_dir):
-                    continue    
-                dir_to_del = []
-                for root, dirs, files in os.walk(path):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        ext = full_path[-3:].lower()
-                        sz = os.path.getsize(full_path)
-                        print 'File path is %s, size is %d' % (full_path, sz)
-                        if (ext=='mkv' or ext=='mp4' or ext=='avi') and (sz > MOVIE_FILE_THRESHOLD):
-                            new_file_name = NameConvert(file[:-4]) + '.' + ext
-                            shutil.move(full_path, os.path.join(path, new_file_name))
-                            print 'Move [%s] to [%s]' % (full_path, os.path.join(path, new_file_name))
-                        else:   
-                            os.remove(full_path)
-                            print 'Remove %s' % full_path
-                    for dir in dirs:
-                        full_dir = os.path.join(root, dir)
-                        dir_to_del.append(full_dir)
-                        print 'Add %s to delete.' % full_dir
-                        
-                for i in dir_to_del:
-                    shutil.rmtree(i,ignore_errors=True)
-                    print 'Remove dir %s' % dir
-            except:
-                print 'Got error when trying to walk path %s' % path
-                continue
-            tc.remove_torrent(hash)
-            print 'Remove torrent: %s' % hash
-                
-    print 'Delete done.'
+            results.append((path, hash))
+    return results
+
+#get specific full path of movie file according to extension and size
+def GetMovieFile(path):
+    for root, _, files in os.walk(path):
+        for file in files:
+            full_path = os.path.join(root, file)
+            ext = full_path[-3:].lower()
+            sz = os.path.getsize(full_path)
+            if (ext in MOVIE_FILE_EXTS) and (sz > MOVIE_FILE_THRESHOLD):
+                DebugLog('Found movie file full path: %s, size: %d' % (full_path, sz))
+                return full_path, ext
+    return '', ''
+    
+def DelOldTasks(tc, base_dir):
+    DebugLog('Delete old tasks...')
+    #iterate over all finished jobs
+    for path, hash in GetFinishedTorrents(tc):
+        DebugLog('Download dir is [%s], base dir is [%s]' % (path, base_dir))   
+        #remove this job from transmissionrpc first
+        tc.remove_torrent(hash)
+        DebugLog('Remove torrent from transmissionrpc: %s' % hash)
+        #get movie file's full path        
+        movie_file, ext = GetMovieFile(path)
+        if movie_file == '' or ext == '':
+            continue       
+        #create new folder for movie file
+        dir_name = NameConvert(path)
+        os.mkdir(dir_name)
+        DebugLog('Create dir: %s' % dir_name)
+        #move movie file into new folders
+        new_file_name = NameConvert(movie_file) + '.' + ext
+        shutil.move(movie_file, os.path.join(dir_name, new_file_name))
+        DebugLog('Move [%s] to [%s]' % (movie_file, os.path.join(dir_name, new_file_name)))
+        #delete old dir
+        shutil.rmtree(path, ignore_errors=True)
+        DebugLog('Remove dir: %s' % path)
+        #download sub for movie file                
+    DebugLog('Delete done.')
     
 def PostNewTasks(tc, base_dir):
-    print 'Posting new tasks to transmission...'
-    #i = 3   #only open when debuging
+    DebugLog('Posting new tasks to transmission...')
     for (k,v) in MOVIE_INFO.items():
         dir_to_down = os.path.join(base_dir, k).rstrip()
-        print 'Creating download dir [%s]' % dir_to_down
+        DebugLog('Creating download dir [%s]' % dir_to_down)
         try:
             os.mkdir(dir_to_down)
         except:
-            print 'Create download dir failed, error exit.'
+            DebugLog('Create download dir failed, error exit.')
             break
-        ret = tc.add_torrent(v, download_dir=dir_to_down)
-        print ret
-        #i-=1    #only open when debuging
-        #if i==0:    #only open when debuging
-        #    break
-    print 'Post done.'
+        tc.add_torrent(v, download_dir=dir_to_down)
+    DebugLog('Post done.')
     
 def TackleTransmission():
-    print 'Tackling transmissions...'
+    DebugLog('Tackling transmissions...')
     tc = transmissionrpc.Client(TRANSMISSION_IP, port=TRANSMISSION_PORT)
     session = tc.get_session()
     download_dir = session.download_dir
-    print 'Download dir is:%s' % download_dir
+    DebugLog('Download dir is:%s' % download_dir)
     if True==os.path.exists(download_dir):
         DelOldTasks(tc, download_dir)
         PostNewTasks(tc, download_dir)
     else:
-        print 'Download dir does not exist, error exit.'
+        DebugLog('Download dir does not exist, error exit.')
     del session
     del tc
     
 def DbInit():
-    print 'Connecting to DB...'
+    DebugLog('Connecting to DB...')
     conn = sqlite3.connect(DB_FILE)
     if conn is None:
-        print 'Connect to db failed, exit.'
+        DebugLog('Connect to db failed, exit.')
         sys.exit(1)
         
     cursor = conn.cursor()
     if cursor is None:
-        print 'Failed to get cursor, exit.'
+        DebugLog('Failed to get cursor, exit.')
         sys.exit(1)
  
     found = False
@@ -246,18 +269,18 @@ def DbInit():
     if not found:
         ret = cursor.execute("CREATE TABLE %s (`name` TEXT PRIMARY KEY NOT NULL, `url` TEXT DEFAULT NULL)" % TABLE_NAME)
         if ret is None:
-            print 'Failed to create table, exit.'
+            DebugLog('Failed to create table, exit.')
             sys.exit(1)
             
     if found:
         ret = cursor.execute("select count(*) from %s" % TABLE_NAME)
         if ret is None:
-            print 'Failed to get count, exit.'
+            DebugLog('Failed to get count, exit.')
             sys.exit(1)
         for i in ret:
-            print 'Total items in database is %s' % i[0]
+            DebugLog('Total items in database is %s' % i[0])
     
-    print 'Connect to DB successfully.'
+    DebugLog('Connect to DB successfully.')
     return conn, cursor
     
 def DbDeInit(conn, cursor):
@@ -267,7 +290,7 @@ def DbDeInit(conn, cursor):
     finally:
         if conn is not None:
             conn.close()
-    print 'Cleanup done.'
+    DebugLog('Cleanup done.')
 
 def PrintDB():
     #init
@@ -277,7 +300,7 @@ def PrintDB():
     counter = 0
     ret = cursor.execute("SELECT name from %s" % TABLE_NAME)
     for i in ret:
-        print '%d exist movie [%s]' % (counter, i[0])
+        DebugLog('%d exist movie [%s]' % (counter, i[0]))
         counter += 1
 
     #clean up
@@ -309,6 +332,8 @@ if __name__ == '__main__':
     
     #write movies name and url to file
     WriteToFile()
+
+    GetSubtitles()
     
     #tackle transmission
     if USE_TRANSMISSION_RPC:
