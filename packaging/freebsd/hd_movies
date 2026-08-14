@@ -1,0 +1,39 @@
+#!/bin/sh
+# PROVIDE: hd_movies
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="hd_movies"
+rcvar="${name}_enable"
+
+load_rc_config "${name}"
+
+: "${hd_movies_enable:=NO}"
+: "${hd_movies_binary:=/usr/local/sbin/hd-movies}"
+: "${hd_movies_env:=/usr/local/etc/hd-movies.env}"
+: "${hd_movies_log:=/var/log/hd-movies.log}"
+: "${hd_movies_args:=}"
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-P ${pidfile} -o ${hd_movies_log} ${hd_movies_binary} ${hd_movies_args}"
+start_precmd="hd_movies_prestart"
+
+hd_movies_prestart()
+{
+    if [ ! -x "${hd_movies_binary}" ]; then
+        err "${hd_movies_binary} is missing or not executable"
+        return 1
+    fi
+    if [ ! -r "${hd_movies_env}" ]; then
+        err "${hd_movies_env} is missing or unreadable"
+        return 1
+    fi
+    set -a
+    . "${hd_movies_env}"
+    set +a
+}
+
+run_rc_command "$1"

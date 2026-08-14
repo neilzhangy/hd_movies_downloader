@@ -1,5 +1,149 @@
-# hd_movies_downloader
-1. Get a list from thepiratebay.org top 100 hd movies.
-2. Write down movie names into a sqlite database.
-3. Each time you run this script, it will compare movies by the database. Only download movies which are not in the database.
-4. Post URL to Transimission service by transimissionrpc.(You should have your own Transimission service in your router or NAS)
+# hd-movies 3.0
+
+`hd-movies` is a Rust service intended to run in the same TrueNAS/FreeNAS jail as Transmission. It polls movie feeds, remembers releases in SQLite, queues new magnet/torrent URLs through Transmission RPC, and tidies completed jobs into a consistent local library layout.
+
+Subtitle searching and downloading are gone. The organizer only keeps subtitle files that already arrived with a torrent.
+
+```text
+src/
+  app.rs           service lifecycle and queue orchestration
+  cli.rs           command-line and environment configuration
+  feed.rs          TPB fetch, parser, and release filtering
+  db.rs            SQLite state and legacy migration
+  transmission.rs  unauthenticated Transmission RPC client
+  organizer.rs     local completed-download normalization
+  models.rs        shared data types
+  main.rs          thin executable entry point
+```
+
+See [DESIGN.md](DESIGN.md) for the operational design and [CHANGELOG.md](CHANGELOG.md) for the change history.
+
+## What it keeps and removes
+
+For each managed, completed torrent, the service selects the largest `.mkv`, `.mp4`, or `.avi` file at least 500 MiB by default. It also keeps existing `.srt`, `.ass`, `.ssa`, `.sub`, and `.vtt` files. Everything else in that managed download folder is discarded after a successful move.
+
+For a release called `Example Movie 2026 1080p`, the final layout is:
+
+```text
+<library>/Example Movie 2026 1080p/
+  Example Movie 2026 1080p.mkv
+  Example Movie 2026 1080p.en.srt
+```
+
+No subtitle site is contacted, no subtitle archive is downloaded, and no `web_data` file is created.
+
+## Build and install
+
+Build on the target FreeBSD version and architecture when possible:
+
+```sh
+pkg install rust
+cd /path/to/hd
+cargo build --release --locked
+install -d -m 755 /var/db/hd-movies
+install -m 755 target/release/hd-movies /usr/local/sbin/hd-movies
+```
+
+The runnable release binary is `target/release/hd-movies`. SQLite is bundled and HTTPS uses Rustls, so the deployed binary does not need Python, `transmissionrpc`, OpenSSL, or a system SQLite library.
+
+## Configuration
+
+Create `/usr/local/etc/hd-movies.env` in the Transmission jail:
+
+```sh
+HD_MOVIES_DB=/var/db/hd-movies/movies.db
+HD_MOVIES_INTERVAL_SECONDS=21600
+
+# Transmission is local to this jail. The legacy port remains the default.
+HD_MOVIES_TRANSMISSION_IP=127.0.0.1
+HD_MOVIES_TRANSMISSION_PORT=9999
+
+# Both paths must exist inside this jail and must be separate.
+HD_MOVIES_DOWNLOAD_DIR=/mnt/downloads/movies
+HD_MOVIES_LIBRARY_DIR=/mnt/media/movies
+
+# Optional; defaults to 500.
+# HD_MOVIES_MINIMUM_MOVIE_SIZE_MIB=500
+
+# Optional comma-separated replacement feed list.
+# HD_MOVIES_SOURCE='https://tpb.party/top/207,https://tpb.party/browse/207/1/7/0'
+```
+
+The client uses the standard unauthenticated endpoint `http://IP:PORT/transmission/rpc`. Verify it before enabling the service:
+
+```sh
+/usr/local/sbin/hd-movies --check-transmission
+```
+
+This calls only Transmission's read-only `session-get` method and creates neither a database nor a torrent. A successful response prints the configured download directory. If the Transmission web UI is reachable at the same IP and port, this is normally the correct RPC configuration.
+
+`HD_MOVIES_DOWNLOAD_DIR` must be the same local parent directory Transmission uses. New torrents receive a normalized child directory beneath it, which makes cleanup safe. `HD_MOVIES_LIBRARY_DIR` must be elsewhere on the filesystem; it is the destination for finalized movie folders.
+
+## First migration
+
+To retain the Python scanner's history, copy its `movies.db` into `/var/db/hd-movies/movies.db`. Version 3.0 automatically adds its state columns to the legacy `MOVIES(name, url)` table and marks existing rows as already queued, preventing historical releases from being added again.
+
+If no old database is available, establish a baseline once:
+
+```sh
+/usr/local/sbin/hd-movies --first-run
+```
+
+This stores current eligible releases as `baseline` and performs neither torrent submission nor completed-file cleanup. Stop the old Python job before enabling v3.0.
+
+## Run as a service
+
+Install the supplied rc.d wrapper and enable it:
+
+```sh
+install -m 755 packaging/freebsd/hd_movies /usr/local/etc/rc.d/hd_movies
+sysrc hd_movies_enable=YES
+service hd_movies start
+service hd_movies status
+```
+
+The service scans immediately at startup and then every six hours by default. Its output is written to `/var/log/hd-movies.log`. Use `HD_MOVIES_INTERVAL_SECONDS` in the environment file to change the interval.
+
+For one interactive cycle:
+
+```sh
+/usr/local/sbin/hd-movies --once
+```
+
+Other useful commands:
+
+```sh
+# Scan and update SQLite without RPC submission or file organization.
+/usr/local/sbin/hd-movies --once --no-transmission
+
+# Print status, first-seen time, attempts, queue time, last error, title, and URL.
+/usr/local/sbin/hd-movies --print-db
+
+# Export pending rows in the old alternating title/URL text layout.
+/usr/local/sbin/hd-movies --once --no-transmission --queue-file /var/db/hd-movies/pending.txt
+```
+
+Run `hd-movies --help` for all flags. `--source` may be repeated, `--year` overrides the default current/previous-year filter, and `--quality` defaults to `1080`.
+
+## Safety rules for completed downloads
+
+Organization is enabled only when `HD_MOVIES_LIBRARY_DIR` or `--library-dir` is set. The service only removes a completed source directory when all of these are true:
+
+1. Transmission reports it complete (`seeding`, or a fully complete stopped torrent).
+2. Its download directory is a direct child of the configured download root.
+3. A qualifying movie was moved successfully, followed by any existing subtitle files.
+4. Transmission accepted removal of the torrent record.
+
+The destination folder is never overwritten. A collision leaves the original torrent and files untouched for manual review. A cross-filesystem move uses one short-lived `.part` file for an atomic final rename; normal same-filesystem moves create no temporary files.
+
+## Testing
+
+```sh
+cargo test
+```
+
+The real TPB parser test is deliberately opt-in because it requires the live external pages:
+
+```sh
+cargo test -- --ignored
+```
