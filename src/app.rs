@@ -11,7 +11,8 @@ use crate::db::{
     export_queue, mark_queued, open_database, pending_releases, print_database, record_queue_error,
     record_releases,
 };
-use crate::feed::{effective_sources, effective_years, normalise_name, scan_sources};
+use crate::feed::{effective_sources, normalise_name, scan_sources};
+use crate::filter::{FilterConfig, MovieFilter};
 use crate::http::build_http_client;
 use crate::models::Release;
 use crate::organizer::organize_completed;
@@ -93,17 +94,33 @@ fn scan_once(cli: &Cli) -> Result<()> {
     };
 
     let http_client = build_http_client(cli.insecure_tls)?;
-    let years = effective_years(&cli.years);
     let sources = effective_sources(&cli.sources);
-    let releases = scan_sources(&http_client, &sources, &years, &cli.quality, cli.verbose)?;
+    let candidates = scan_sources(&http_client, &sources, cli.verbose)?;
+    let filter = MovieFilter::new(
+        FilterConfig::new(
+            &cli.years,
+            cli.minimum_torrent_size_mib,
+            cli.minimum_imdb_score,
+        )?,
+        http_client.clone(),
+    );
+    let filter_outcome = filter.filter(&candidates, cli.verbose);
+    let releases = filter_outcome.releases;
+    println!(
+        "scanned {} torrent candidate(s); {} passed filters ({} basic rejection(s), {} IMDb-score rejection(s), {} IMDb lookup failure(s))",
+        candidates.len(),
+        releases.len(),
+        filter_outcome.basic_rejections,
+        filter_outcome.rating_rejections,
+        filter_outcome.lookup_failures,
+    );
     let mut database = open_database(&cli.db)?;
 
     if cli.first_run {
         let added = record_releases(&mut database, &releases, "baseline")?;
         export_queue(cli.queue_file.as_deref(), &[])?;
         println!(
-            "initial baseline complete: scanned {} eligible releases and recorded {} new release(s); no torrents were queued",
-            releases.len(),
+            "initial baseline complete: recorded {} new filtered release(s); no torrents were queued",
             added
         );
         return Ok(());
@@ -113,8 +130,7 @@ fn scan_once(cli: &Cli) -> Result<()> {
     let pending_before_delivery = pending_releases(&database)?;
     export_queue(cli.queue_file.as_deref(), &pending_before_delivery)?;
     println!(
-        "scanned {} eligible releases; recorded {} new release(s); {} pending queue item(s)",
-        releases.len(),
+        "recorded {} new filtered release(s); {} pending queue item(s)",
         added,
         pending_before_delivery.len()
     );

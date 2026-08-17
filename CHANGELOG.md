@@ -1,5 +1,13 @@
 # Change history
 
+## Unreleased
+
+- Kept the FreeBSD 13.1 cross-build sysroot, base archive, and linker wrapper in the ignored project-local `.freebsd13-build/` cache, with a reusable `scripts/build-freebsd13.sh` command.
+- Added a dedicated `filter` module for download eligibility.
+- Changed discovery eligibility to require an advertised torrent size strictly above 500 MiB, this year or last year, a `4K` or `2160p` release token, and an IMDb score strictly above 6.0.
+- Added exact IMDb title/year resolution and fail-closed rating lookup behavior, plus configurable size and score thresholds.
+- Extended TPB parsing to retain advertised torrent sizes and added unit and opt-in live coverage for the new filter.
+
 ## 3.0.0 — 2026-08-14
 
 - Replaced the Python implementation with a single Rust binary named `hd-movies`.

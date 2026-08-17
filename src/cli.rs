@@ -59,6 +59,19 @@ pub struct Cli {
     #[arg(long, env = "HD_MOVIES_MINIMUM_MOVIE_SIZE_MIB", default_value_t = 500)]
     pub minimum_movie_size_mib: u64,
 
+    /// Minimum advertised torrent size required before a movie is considered for download.
+    /// The torrent must be strictly larger than this value.
+    #[arg(
+        long,
+        env = "HD_MOVIES_MINIMUM_TORRENT_SIZE_MIB",
+        default_value_t = 500
+    )]
+    pub minimum_torrent_size_mib: u64,
+
+    /// IMDb rating threshold. A movie must have a score strictly greater than this value.
+    #[arg(long, env = "HD_MOVIES_MINIMUM_IMDB_SCORE", default_value_t = 6.0)]
+    pub minimum_imdb_score: f64,
+
     /// Do not contact Transmission; retain all new releases as pending in SQLite.
     #[arg(long)]
     pub no_transmission: bool,
@@ -67,10 +80,6 @@ pub struct Cli {
     /// SQLite remains the authoritative queue; no queue file is created unless this is specified.
     #[arg(long, env = "HD_MOVIES_QUEUE_FILE", value_name = "FILE")]
     pub queue_file: Option<PathBuf>,
-
-    /// Require this text in a release name (the legacy behavior is 1080).
-    #[arg(long, default_value = "1080")]
-    pub quality: String,
 
     /// Accept a specific release year. Repeat for more than one. Defaults to this year and last year.
     #[arg(long = "year", value_delimiter = ',')]

@@ -12,7 +12,8 @@ The service does not search for, download, unpack, or otherwise acquire subtitle
 | --- | --- |
 | `app` | Service loop, one-cycle workflow, and pending-torrent delivery. |
 | `cli` | Flags and environment-backed configuration. |
-| `feed` | HTTP fetch/retry, TPB parsing, title normalization, and filtering. |
+| `feed` | HTTP fetch/retry, TPB parsing, title normalization, and advertised-size extraction. |
+| `filter` | Download eligibility rules, IMDb title resolution, and IMDb-score lookup. |
 | `db` | Durable release state, retry diagnostics, queue export, and legacy migration. |
 | `transmission` | Standard `409` session-ID handshake and RPC methods. |
 | `organizer` | Safe local selection, naming, moving, rollback, and source cleanup. |
@@ -25,7 +26,7 @@ flowchart LR
     Complete --> Organize[Keep movie + local subtitles]
     Organize --> Library[Normalized library folder]
     Feed[TPB pages] --> Parse[Fetch and parse in memory]
-    Parse --> Filter[Year + quality filter]
+    Parse --> Filter[Size + year + 4K/2160p + IMDb filter]
     Filter --> DB[(movies.db)]
     DB --> Pending[Pending rows]
     Pending --> Transmission
@@ -44,9 +45,20 @@ The parser recognizes both:
 - the current TPB table layout, which uses a title anchor beginning with `Details for` and a magnet link;
 - the old `.detName`/`.detLink` layout used by the Python script.
 
-Names are normalized by replacing each run of non-alphanumeric characters with one space. Eligible releases contain a configured year and quality string. Defaults are the current local year plus the previous year, and `1080` quality.
+Names are normalized by replacing each run of non-alphanumeric characters with one space. The current TPB table's advertised file size is extracted from its row; the legacy parser also recognizes `MiB`/`GiB` size text. An unparseable size is retained as an incomplete candidate but cannot pass the download filter.
 
 Each source is retried up to three times. If every source fails, no SQLite database is opened and no new torrent is queued. A successful response that produces no recognizable torrent rows emits a warning so a TPB layout change cannot silently look like an empty update.
+
+## Movie filter
+
+`filter` is intentionally separate from TPB parsing and from Transmission delivery. A candidate is eligible only when all conditions below are true:
+
+1. Its advertised torrent size is strictly greater than `minimum_torrent_size_mib` (500 MiB by default).
+2. Its name contains a configured release year; by default, that is the local calendar year or the preceding year.
+3. Its name contains a `4K` or `2160p` resolution token.
+4. Its exact normalized title and year resolve to an IMDb movie and the returned IMDb score is strictly greater than `minimum_imdb_score` (6.0 by default).
+
+The filter removes release-group text by taking the normalized words before the matching year, resolves the IMDb ID with IMDb's public suggestion endpoint, and retrieves the `imdbRating` for that exact ID through the Cinemeta movie-metadata endpoint. It does not guess when a title or year is ambiguous. Ratings are cached in memory for the duration of a scan, so multiple release variants of one title use one lookup. Missing metadata, unavailable services, invalid scores, and scores at or below the threshold all fail closed: the torrent is not recorded or queued. Verbose mode reports the individual rejection reason, while each cycle prints aggregate filter counts.
 
 ## SQLite state
 
@@ -99,8 +111,8 @@ Only managed direct-child folders are eligible. A torrent using the download roo
 
 The release profile enables thin LTO and strips symbols. SQLite is bundled and Rustls avoids an OpenSSL runtime dependency. At runtime the intentional persistent files are the executable, `movies.db`, the optional log, and an optional explicit queue export. Temporary `.part` files arise only while copying a media file across filesystems and are removed on success or copy failure.
 
-Build for the target FreeBSD architecture, deploy the release binary, and install the supplied `packaging/freebsd/hd_movies` rc.d wrapper.
+Build for the target FreeBSD architecture, deploy the release binary, and install the supplied `packaging/freebsd/hd_movies` rc.d wrapper. For this development checkout, the FreeBSD 13.1 sysroot, base archive, and Zig linker wrapper live in the Git-ignored `.freebsd13-build/` cache. `./scripts/build-freebsd13.sh` reuses that cache to build an amd64 TrueNAS CORE 13 binary without re-downloading the base archive; the cache is intentionally local and path-specific.
 
 ## Tests
 
-Unit tests cover title normalization/filtering, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. The ignored live integration test fetches both current default TPB pages and verifies that each produces valid torrent releases. Run it explicitly with `cargo test -- --ignored`.
+Unit tests cover title normalization, TPB size parsing, filter decisions, IMDb response parsing, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. Ignored live integration tests fetch both current default TPB pages and resolve a known IMDb score. Run them explicitly with `cargo test -- --ignored`.

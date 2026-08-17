@@ -1,13 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::Datelike;
 use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
 
-use crate::models::Release;
+use crate::models::ReleaseCandidate;
 
 pub const DEFAULT_SOURCES: [&str; 2] = [
     "https://tpb.party/top/207",
@@ -25,22 +24,11 @@ pub fn effective_sources(sources: &[String]) -> Vec<String> {
     }
 }
 
-pub fn effective_years(years: &[i32]) -> HashSet<i32> {
-    if !years.is_empty() {
-        return years.iter().copied().collect();
-    }
-
-    let current_year = chrono::Local::now().year();
-    [current_year, current_year - 1].into_iter().collect()
-}
-
 pub fn scan_sources(
     client: &Client,
     sources: &[String],
-    years: &HashSet<i32>,
-    quality: &str,
     verbose: bool,
-) -> Result<Vec<Release>> {
+) -> Result<Vec<ReleaseCandidate>> {
     let mut by_name = BTreeMap::new();
     let mut successful_feeds = 0;
 
@@ -48,7 +36,7 @@ pub fn scan_sources(
         match fetch_source(client, source) {
             Ok(page) => {
                 successful_feeds += 1;
-                let parsed = parse_releases(&page, source);
+                let parsed = parse_candidates(&page, source);
                 if parsed.is_empty() {
                     eprintln!(
                         "warning: feed {source} returned no recognizable torrent rows; no releases from it were recorded"
@@ -59,9 +47,16 @@ pub fn scan_sources(
                         parsed.len()
                     );
                 }
-                for release in parsed {
-                    if eligible(&release.name, years, quality) {
-                        by_name.entry(release.name.clone()).or_insert(release);
+                for candidate in parsed {
+                    let key = candidate.name.clone();
+                    let should_replace = by_name
+                        .get(&key)
+                        .map(|existing: &ReleaseCandidate| {
+                            existing.size_bytes.is_none() && candidate.size_bytes.is_some()
+                        })
+                        .unwrap_or(true);
+                    if should_replace {
+                        by_name.insert(key, candidate);
                     }
                 }
             }
@@ -92,7 +87,7 @@ fn fetch_source(client: &Client, source: &str) -> Result<String> {
     Err(last_error.unwrap_or_else(|| anyhow!("unknown HTTP error"))).context("fetch feed")
 }
 
-pub fn parse_releases(page: &str, source: &str) -> Vec<Release> {
+pub fn parse_candidates(page: &str, source: &str) -> Vec<ReleaseCandidate> {
     let document = Html::parse_document(page);
     let detail_selector =
         Selector::parse(".detName a, a.detLink, a[title^='Details for']").expect("valid selector");
@@ -102,35 +97,35 @@ pub fn parse_releases(page: &str, source: &str) -> Vec<Release> {
         Selector::parse(".torrent").expect("valid selector"),
         Selector::parse(".item").expect("valid selector"),
     ];
-    let mut releases = Vec::new();
+    let mut candidates = Vec::new();
 
     for record_selector in &record_selectors {
         for record in document.select(record_selector) {
-            if let Some(release) =
-                release_from_element(record, &detail_selector, &anchor_selector, source)
+            if let Some(candidate) =
+                candidate_from_element(record, &detail_selector, &anchor_selector, source)
             {
-                releases.push(release);
+                candidates.push(candidate);
             }
         }
     }
 
-    if releases.is_empty() {
-        releases.extend(parse_legacy_blocks(page, source, &anchor_selector));
+    if candidates.is_empty() {
+        candidates.extend(parse_legacy_blocks(page, source, &anchor_selector));
     }
 
     let mut unique = BTreeMap::new();
-    for release in releases {
-        unique.entry(release.name.clone()).or_insert(release);
+    for candidate in candidates {
+        unique.entry(candidate.name.clone()).or_insert(candidate);
     }
     unique.into_values().collect()
 }
 
-fn release_from_element(
+fn candidate_from_element(
     element: ElementRef<'_>,
     detail_selector: &Selector,
     anchor_selector: &Selector,
     source: &str,
-) -> Option<Release> {
+) -> Option<ReleaseCandidate> {
     let raw_name = element
         .select(detail_selector)
         .next()
@@ -146,10 +141,18 @@ fn release_from_element(
         .filter_map(|anchor| anchor.value().attr("href"))
         .find(|href| is_torrent_link(href))
         .map(|href| resolve_url(source, href))?;
-    Some(Release { name, url })
+    Some(ReleaseCandidate {
+        name,
+        url,
+        size_bytes: torrent_size_bytes(&element_text(element)),
+    })
 }
 
-fn parse_legacy_blocks(page: &str, source: &str, anchor_selector: &Selector) -> Vec<Release> {
+fn parse_legacy_blocks(
+    page: &str,
+    source: &str,
+    anchor_selector: &Selector,
+) -> Vec<ReleaseCandidate> {
     let mut releases = Vec::new();
     let mut cursor = 0;
 
@@ -172,12 +175,47 @@ fn parse_legacy_blocks(page: &str, source: &str, anchor_selector: &Selector) -> 
         if let (Some(raw_name), Some(url)) = (raw_name, url) {
             let name = normalise_name(&raw_name);
             if !name.is_empty() {
-                releases.push(Release { name, url });
+                releases.push(ReleaseCandidate {
+                    name,
+                    url,
+                    size_bytes: torrent_size_bytes(&element_text(fragment.root_element())),
+                });
             }
         }
         cursor = end;
     }
     releases
+}
+
+fn torrent_size_bytes(text: &str) -> Option<u64> {
+    let tokens: Vec<_> = text.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        let number = pair[0]
+            .trim_matches(|character: char| !character.is_ascii_digit() && character != '.')
+            .parse::<f64>();
+        let Ok(value) = number else {
+            continue;
+        };
+        let unit = pair[1]
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        let multiplier = match unit.as_str() {
+            "b" => 1,
+            "kb" => 1_000,
+            "kib" => 1_024,
+            "mb" => 1_000_000,
+            "mib" => 1_024 * 1_024,
+            "gb" => 1_000_000_000,
+            "gib" => 1_024 * 1_024 * 1_024,
+            "tb" => 1_000_000_000_000,
+            "tib" => 1_024_u64.pow(4),
+            _ => continue,
+        };
+        if value.is_finite() && value >= 0.0 {
+            return Some((value * multiplier as f64) as u64);
+        }
+    }
+    None
 }
 
 fn element_text(element: ElementRef<'_>) -> String {
@@ -222,13 +260,6 @@ pub fn normalise_name(name: &str) -> String {
     output.trim().to_owned()
 }
 
-fn eligible(name: &str, years: &HashSet<i32>, quality: &str) -> bool {
-    years.iter().any(|year| name.contains(&year.to_string()))
-        && name
-            .to_ascii_lowercase()
-            .contains(&quality.to_ascii_lowercase())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,22 +276,23 @@ mod tests {
         let client = build_http_client(false).unwrap();
         for source in DEFAULT_SOURCES {
             let page = fetch_source(&client, source).unwrap();
-            let releases = parse_releases(&page, source);
+            let candidates = parse_candidates(&page, source);
             assert!(
-                !releases.is_empty(),
+                !candidates.is_empty(),
                 "{source} returned no parsable torrent releases; inspect its current HTML before deploying"
             );
-            assert!(releases
-                .iter()
-                .all(|release| { !release.name.is_empty() && is_torrent_link(&release.url) }));
+            assert!(candidates.iter().all(|candidate| {
+                !candidate.name.is_empty()
+                    && is_torrent_link(&candidate.url)
+                    && candidate.size_bytes.is_some()
+            }));
         }
     }
 
     #[test]
-    fn uses_year_and_quality_filters() {
-        let years = [2026].into_iter().collect();
-        assert!(eligible("Movie 2026 1080p", &years, "1080"));
-        assert!(!eligible("Movie 2025 1080p", &years, "1080"));
-        assert!(!eligible("Movie 2026 2160p", &years, "1080"));
+    fn parses_torrent_size_units() {
+        assert_eq!(torrent_size_bytes("Film 1.5 GiB 7 2"), Some(1_610_612_736));
+        assert_eq!(torrent_size_bytes("Film 500 MiB 7 2"), Some(524_288_000));
+        assert_eq!(torrent_size_bytes("Film without a size"), None);
     }
 }

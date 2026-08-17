@@ -8,7 +8,8 @@ Subtitle searching and downloading are gone. The organizer only keeps subtitle f
 src/
   app.rs           service lifecycle and queue orchestration
   cli.rs           command-line and environment configuration
-  feed.rs          TPB fetch, parser, and release filtering
+  feed.rs          TPB fetch, parser, title normalization, and size extraction
+  filter.rs        size/year/4K/IMDb eligibility rules and rating lookup
   db.rs            SQLite state and legacy migration
   transmission.rs  unauthenticated Transmission RPC client
   organizer.rs     local completed-download normalization
@@ -22,15 +23,26 @@ See [DESIGN.md](DESIGN.md) for the operational design and [CHANGELOG.md](CHANGEL
 
 For each managed, completed torrent, the service selects the largest `.mkv`, `.mp4`, or `.avi` file at least 500 MiB by default. It also keeps existing `.srt`, `.ass`, `.ssa`, `.sub`, and `.vtt` files. Everything else in that managed download folder is discarded after a successful move.
 
-For a release called `Example Movie 2026 1080p`, the final layout is:
+For a release called `Example Movie 2026 2160p`, the final layout is:
 
 ```text
-<library>/Example Movie 2026 1080p/
-  Example Movie 2026 1080p.mkv
-  Example Movie 2026 1080p.en.srt
+<library>/Example Movie 2026 2160p/
+  Example Movie 2026 2160p.mkv
+  Example Movie 2026 2160p.en.srt
 ```
 
 No subtitle site is contacted, no subtitle archive is downloaded, and no `web_data` file is created.
+
+## Download filter
+
+Before a TPB candidate is recorded in SQLite or sent to Transmission, all of these conditions must pass:
+
+- Its advertised torrent size is strictly greater than 500 MiB.
+- Its normalized release name contains this calendar year or the previous calendar year.
+- Its normalized release name contains `4K` or `2160p`.
+- An exact IMDb movie-title and year match has an IMDb score strictly greater than 6.0.
+
+The title lookup uses IMDb's public suggestion endpoint to avoid guessing an IMDb ID, then retrieves the score by that ID from a public metadata endpoint. An ambiguous title, a missing rating, or a lookup failure is rejected rather than queued. `--year` can replace the default two-year window when needed.
 
 ## Build and install
 
@@ -45,6 +57,14 @@ install -m 755 target/release/hd-movies /usr/local/sbin/hd-movies
 ```
 
 The runnable release binary is `target/release/hd-movies`. SQLite is bundled and HTTPS uses Rustls, so the deployed binary does not need Python, `transmissionrpc`, OpenSSL, or a system SQLite library.
+
+For a Linux development host, this checkout also retains the already-provisioned FreeBSD 13.1 amd64 sysroot and linker support in `.freebsd13-build/`. That directory is intentionally Git-ignored, so repeated cross-builds do not download or discard the FreeBSD base archive. With Zig available on `PATH`, build the deployable TrueNAS CORE 13 binary with:
+
+```sh
+./scripts/build-freebsd13.sh
+```
+
+It produces `target/x86_64-unknown-freebsd/release/hd-movies`. The local cache is specific to this checkout path; if the project is moved, re-create or update its two local linker configuration files before using it.
 
 ## Configuration
 
@@ -64,6 +84,10 @@ HD_MOVIES_LIBRARY_DIR=/mnt/media/movies
 
 # Optional; defaults to 500.
 # HD_MOVIES_MINIMUM_MOVIE_SIZE_MIB=500
+
+# Download eligibility (both comparisons are strict: >, not >=).
+# HD_MOVIES_MINIMUM_TORRENT_SIZE_MIB=500
+# HD_MOVIES_MINIMUM_IMDB_SCORE=6
 
 # Optional comma-separated replacement feed list.
 # HD_MOVIES_SOURCE='https://tpb.party/top/207,https://tpb.party/browse/207/1/7/0'
@@ -123,7 +147,7 @@ Other useful commands:
 /usr/local/sbin/hd-movies --once --no-transmission --queue-file /var/db/hd-movies/pending.txt
 ```
 
-Run `hd-movies --help` for all flags. `--source` may be repeated, `--year` overrides the default current/previous-year filter, and `--quality` defaults to `1080`.
+Run `hd-movies --help` for all flags. `--source` may be repeated, and `--year` overrides the default current/previous-year filter. The release-name resolution requirement is fixed at `4K` or `2160p`; adjust the size and rating thresholds with their dedicated flags or environment variables.
 
 ## Safety rules for completed downloads
 
@@ -142,7 +166,7 @@ The destination folder is never overwritten. A collision leaves the original tor
 cargo test
 ```
 
-The real TPB parser test is deliberately opt-in because it requires the live external pages:
+The live parser and IMDb-rating checks are deliberately opt-in because they require external services:
 
 ```sh
 cargo test -- --ignored

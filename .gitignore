@@ -1,3 +1,4 @@
 /target/
+/.freebsd13-build/
 /movies.db
 /to_download
