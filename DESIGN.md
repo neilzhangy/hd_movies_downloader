@@ -12,9 +12,9 @@ The service does not search for, download, unpack, or otherwise acquire subtitle
 | --- | --- |
 | `app` | Service loop, one-cycle workflow, and pending-torrent delivery. |
 | `cli` | Flags and environment-backed configuration. |
-| `feed` | HTTP fetch/retry, TPB parsing, title normalization, and advertised-size extraction. |
-| `filter` | Download eligibility rules, IMDb title resolution, and IMDb-score lookup. |
-| `db` | Durable release state, retry diagnostics, queue export, and legacy migration. |
+| `feed` | HTTP fetch/retry, TPB parsing, title normalization, and advertised size/swarm extraction. |
+| `filter` | Eligibility rules, IMDb title resolution, IMDb-score lookup, and one-variant selection. |
+| `db` | Canonical movie state, retry diagnostics, queue export, and legacy migration. |
 | `transmission` | Standard `409` session-ID handshake and RPC methods. |
 | `organizer` | Safe local selection, naming, moving, rollback, and source cleanup. |
 
@@ -45,7 +45,7 @@ The parser recognizes both:
 - the current TPB table layout, which uses a title anchor beginning with `Details for` and a magnet link;
 - the old `.detName`/`.detLink` layout used by the Python script.
 
-Names are normalized by replacing each run of non-alphanumeric characters with one space. The current TPB table's advertised file size is extracted from its row; the legacy parser also recognizes `MiB`/`GiB` size text. An unparseable size is retained as an incomplete candidate but cannot pass the download filter.
+Names are normalized by replacing each run of non-alphanumeric characters with one space. The current TPB table's advertised file size, seeders, and leechers are extracted from its row; the legacy parser also recognizes `MiB`/`GiB` size text. An unparseable size is retained as an incomplete candidate but cannot pass the download filter.
 
 Each source is retried up to three times. If every source fails, no SQLite database is opened and no new torrent is queued. A successful response that produces no recognizable torrent rows emits a warning so a TPB layout change cannot silently look like an empty update.
 
@@ -58,7 +58,9 @@ Each source is retried up to three times. If every source fails, no SQLite datab
 3. Its name contains a `4K` or `2160p` resolution token.
 4. Its exact normalized title and year resolve to an IMDb movie and the returned IMDb score is strictly greater than `minimum_imdb_score` (6.0 by default).
 
-The filter removes release-group text by taking the normalized words before the matching year, resolves the IMDb ID with IMDb's public suggestion endpoint, and retrieves the `imdbRating` for that exact ID through the Cinemeta movie-metadata endpoint. It does not guess when a title or year is ambiguous. Ratings are cached in memory for the duration of a scan, so multiple release variants of one title use one lookup. Missing metadata, unavailable services, invalid scores, and scores at or below the threshold all fail closed: the torrent is not recorded or queued. Verbose mode reports the individual rejection reason, while each cycle prints aggregate filter counts.
+The filter removes release-group text by taking the normalized words before the matching year, resolves the IMDb ID with IMDb's public suggestion endpoint, and retrieves the `imdbRating` for that exact ID through the Cinemeta movie-metadata endpoint. It does not guess when a title or year is ambiguous. Ratings are cached in memory for the duration of a scan, so multiple release variants of one title use one lookup. Missing metadata, unavailable services, invalid scores, and scores at or below the threshold all fail closed: the torrent is not recorded or queued.
+
+Every passing candidate for the same exact IMDb ID is collapsed to one selected torrent before SQLite is touched. A known zero-seeder swarm loses to a live swarm; otherwise the ordering is: Dolby Vision (`DV`, `DoVi`, or `Dolby Vision`), source tier (`REMUX`, BluRay, WEB-DL, WEBRip), HDR, codec, seeders, leechers, then size. Dolby Vision therefore deliberately wins over a non-Dolby variant of the same film even when that non-Dolby variant has a stronger source label or larger swarm. Verbose mode reports the selected candidate and its rank; each cycle reports the number of duplicate variants collapsed.
 
 ## SQLite state
 
@@ -66,16 +68,18 @@ The filter removes release-group text by taking the normalized words before the 
 
 | Field | Meaning |
 | --- | --- |
-| `name` | Normalized title; primary key. |
+| `name` | Selected TPB release name; primary key. |
 | `url` | Magnet or `.torrent` URL. |
+| `movie_key` | Normalized title/year used to prevent future TPB filename variants from being queued. |
+| `imdb_id`, `imdb_rating` | Exact canonical movie identity and the score used for eligibility. |
 | `first_seen_at` | Discovery time. |
 | `status` | `baseline`, `pending`, or `queued`. |
 | `queued_at` | Time Transmission accepted the URL. |
 | `attempts`, `last_error` | Durable retry diagnostics. |
 
-New releases are inserted transactionally. A normal discovery becomes `pending`; a first-run discovery becomes `baseline`. A successful `torrent-add` response—including Transmission's duplicate response—marks it `queued`. Failures leave it `pending`, save the error, and retry it on the next cycle.
+New selections are inserted transactionally only when neither their title/year key nor IMDb ID already exists. A normal discovery becomes `pending`; a first-run discovery becomes `baseline`. A successful `torrent-add` response—including Transmission's duplicate response—marks it `queued`. Failures leave it `pending`, save the error, and retry it on the next cycle. No other TPB variant for that movie is queued automatically.
 
-Legacy Python databases are migrated in place: missing state columns are added and existing `MOVIES(name, url)` records become `queued`, avoiding accidental replay of historical downloads.
+Legacy Python databases are migrated in place: missing state columns are added, recognizable title/year keys are backfilled, and existing `MOVIES(name, url)` records become `queued`, avoiding accidental replay of historical downloads.
 
 `--queue-file` is an optional compatibility export only. It is not part of the durable workflow.
 
@@ -115,4 +119,4 @@ Build for the target FreeBSD architecture, deploy the release binary, and instal
 
 ## Tests
 
-Unit tests cover title normalization, TPB size parsing, filter decisions, IMDb response parsing, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. Ignored live integration tests fetch both current default TPB pages and resolve a known IMDb score. Run them explicitly with `cargo test -- --ignored`.
+Unit tests cover title normalization, TPB size/swarm parsing, Dolby Vision selection, IMDb response parsing, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. Ignored live integration tests fetch both current default TPB pages, resolve a known IMDb score, and verify that a real multi-variant TPB search results in one selected IMDb movie row. Run them explicitly with `cargo test -- --ignored`.

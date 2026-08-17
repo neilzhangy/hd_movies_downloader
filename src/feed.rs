@@ -52,7 +52,7 @@ pub fn scan_sources(
                     let should_replace = by_name
                         .get(&key)
                         .map(|existing: &ReleaseCandidate| {
-                            existing.size_bytes.is_none() && candidate.size_bytes.is_some()
+                            candidate_is_preferred(&candidate, existing)
                         })
                         .unwrap_or(true);
                     if should_replace {
@@ -92,6 +92,7 @@ pub fn parse_candidates(page: &str, source: &str) -> Vec<ReleaseCandidate> {
     let detail_selector =
         Selector::parse(".detName a, a.detLink, a[title^='Details for']").expect("valid selector");
     let anchor_selector = Selector::parse("a[href]").expect("valid selector");
+    let cell_selector = Selector::parse("td").expect("valid selector");
     let record_selectors = [
         Selector::parse("tr").expect("valid selector"),
         Selector::parse(".torrent").expect("valid selector"),
@@ -101,9 +102,13 @@ pub fn parse_candidates(page: &str, source: &str) -> Vec<ReleaseCandidate> {
 
     for record_selector in &record_selectors {
         for record in document.select(record_selector) {
-            if let Some(candidate) =
-                candidate_from_element(record, &detail_selector, &anchor_selector, source)
-            {
+            if let Some(candidate) = candidate_from_element(
+                record,
+                &detail_selector,
+                &anchor_selector,
+                &cell_selector,
+                source,
+            ) {
                 candidates.push(candidate);
             }
         }
@@ -124,6 +129,7 @@ fn candidate_from_element(
     element: ElementRef<'_>,
     detail_selector: &Selector,
     anchor_selector: &Selector,
+    cell_selector: &Selector,
     source: &str,
 ) -> Option<ReleaseCandidate> {
     let raw_name = element
@@ -141,10 +147,13 @@ fn candidate_from_element(
         .filter_map(|anchor| anchor.value().attr("href"))
         .find(|href| is_torrent_link(href))
         .map(|href| resolve_url(source, href))?;
+    let (size_bytes, seeders, leechers) = torrent_metadata(element, cell_selector);
     Some(ReleaseCandidate {
         name,
         url,
-        size_bytes: torrent_size_bytes(&element_text(element)),
+        size_bytes,
+        seeders,
+        leechers,
     })
 }
 
@@ -179,12 +188,51 @@ fn parse_legacy_blocks(
                     name,
                     url,
                     size_bytes: torrent_size_bytes(&element_text(fragment.root_element())),
+                    seeders: None,
+                    leechers: None,
                 });
             }
         }
         cursor = end;
     }
     releases
+}
+
+fn candidate_is_preferred(candidate: &ReleaseCandidate, existing: &ReleaseCandidate) -> bool {
+    (
+        candidate.size_bytes.is_some(),
+        candidate.seeders.unwrap_or_default(),
+        candidate.leechers.unwrap_or_default(),
+        candidate.size_bytes.unwrap_or_default(),
+    ) > (
+        existing.size_bytes.is_some(),
+        existing.seeders.unwrap_or_default(),
+        existing.leechers.unwrap_or_default(),
+        existing.size_bytes.unwrap_or_default(),
+    )
+}
+
+fn torrent_metadata(
+    element: ElementRef<'_>,
+    cell_selector: &Selector,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let cells: Vec<_> = element.select(cell_selector).collect();
+    let size_index = cells
+        .iter()
+        .position(|cell| torrent_size_bytes(&element_text(*cell)).is_some());
+
+    if let Some(size_index) = size_index {
+        let size_bytes = torrent_size_bytes(&element_text(cells[size_index]));
+        let seeders = cells
+            .get(size_index + 1)
+            .and_then(|cell| torrent_count(&element_text(*cell)));
+        let leechers = cells
+            .get(size_index + 2)
+            .and_then(|cell| torrent_count(&element_text(*cell)));
+        return (size_bytes, seeders, leechers);
+    }
+
+    (torrent_size_bytes(&element_text(element)), None, None)
 }
 
 fn torrent_size_bytes(text: &str) -> Option<u64> {
@@ -216,6 +264,14 @@ fn torrent_size_bytes(text: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn torrent_count(text: &str) -> Option<u64> {
+    let digits: String = text
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 fn element_text(element: ElementRef<'_>) -> String {
@@ -285,6 +341,8 @@ mod tests {
                 !candidate.name.is_empty()
                     && is_torrent_link(&candidate.url)
                     && candidate.size_bytes.is_some()
+                    && candidate.seeders.is_some()
+                    && candidate.leechers.is_some()
             }));
         }
     }
@@ -294,5 +352,25 @@ mod tests {
         assert_eq!(torrent_size_bytes("Film 1.5 GiB 7 2"), Some(1_610_612_736));
         assert_eq!(torrent_size_bytes("Film 500 MiB 7 2"), Some(524_288_000));
         assert_eq!(torrent_size_bytes("Film without a size"), None);
+    }
+
+    #[test]
+    fn parses_tpb_size_and_swarm_columns() {
+        let page = r#"
+            <table><tr>
+              <td>Video &gt; HD - Movies</td>
+              <td><a title="Details for Example Movie 2026 2160p DV WEB DL">Example Movie</a></td>
+              <td>today</td>
+              <td><a href="magnet:?xt=urn:btih:example">magnet</a></td>
+              <td align="right">18.5 GiB</td>
+              <td align="right">1,234</td>
+              <td align="right">56</td>
+            </tr></table>
+        "#;
+        let candidates = parse_candidates(page, "https://tpb.party/top/207");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].size_bytes, Some(19_864_223_744));
+        assert_eq!(candidates[0].seeders, Some(1_234));
+        assert_eq!(candidates[0].leechers, Some(56));
     }
 }

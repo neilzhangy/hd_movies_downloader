@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Collapse TPB variants by exact IMDb movie, persist the canonical title/year key plus IMDb rating, and queue only one selected torrent per movie.
+- Parse TPB seeder/leecher counts and rank live variants by Dolby Vision first, then source quality and swarm health; known zero-seeder variants lose to live swarms.
+- Added a live TPB/IMDb/SQLite integration test proving that a multi-variant TPB result stores one canonical movie row.
 - Kept the FreeBSD 13.1 cross-build sysroot, base archive, and linker wrapper in the ignored project-local `.freebsd13-build/` cache, with a reusable `scripts/build-freebsd13.sh` command.
 - Added a dedicated `filter` module for download eligibility.
 - Changed discovery eligibility to require an advertised torrent size strictly above 500 MiB, this year or last year, a `4K` or `2160p` release token, and an IMDb score strictly above 6.0.

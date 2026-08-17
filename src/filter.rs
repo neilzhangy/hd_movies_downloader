@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{bail, Context, Result};
@@ -22,10 +23,12 @@ pub struct FilterConfig {
 
 #[derive(Debug, Default)]
 pub struct FilterOutcome {
+    /// Exactly one selected release per resolved IMDb movie.
     pub releases: Vec<Release>,
     pub basic_rejections: usize,
     pub rating_rejections: usize,
     pub lookup_failures: usize,
+    pub duplicate_rejections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -34,10 +37,44 @@ struct MovieIdentity {
     year: i32,
 }
 
+impl MovieIdentity {
+    fn movie_key(&self) -> String {
+        format!("{} {}", self.title.to_ascii_lowercase(), self.year)
+    }
+}
+
 #[derive(Debug, Clone)]
-enum RatingLookup {
-    Resolved(Option<f64>),
+struct ImdbMovie {
+    id: String,
+    rating: f64,
+}
+
+#[derive(Debug, Clone)]
+enum MovieLookup {
+    Resolved(Option<ImdbMovie>),
     Failed(String),
+}
+
+#[derive(Debug)]
+struct RatedCandidate<'candidate> {
+    candidate: &'candidate ReleaseCandidate,
+    identity: MovieIdentity,
+    imdb: ImdbMovie,
+}
+
+/// Higher fields always win. A TPB row with a known zero-seeder swarm loses to
+/// one with seeders; otherwise Dolby Vision is deliberately first, before source
+/// quality or swarm popularity is considered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CandidateRank {
+    has_seeders: u8,
+    dolby_vision: u8,
+    source_tier: u8,
+    hdr: u8,
+    codec_tier: u8,
+    seeders: u64,
+    leechers: u64,
+    size_bytes: u64,
 }
 
 pub struct MovieFilter {
@@ -76,10 +113,13 @@ impl MovieFilter {
         Self { config, client }
     }
 
+    /// Filters candidates and selects one best torrent for each exact IMDb movie.
+    /// IMDb lookups are cached by normalized title/year within this scan; the
+    /// resolved IMDb ID is then used to collapse alternate TPB release names.
     pub fn filter(&self, candidates: &[ReleaseCandidate], verbose: bool) -> FilterOutcome {
         let mut outcome = FilterOutcome::default();
-        let mut accepted = BTreeMap::new();
-        let mut rating_cache = BTreeMap::new();
+        let mut groups: BTreeMap<String, Vec<RatedCandidate<'_>>> = BTreeMap::new();
+        let mut lookup_cache = BTreeMap::new();
 
         for candidate in candidates {
             let Some(identity) = movie_identity(candidate, &self.config) else {
@@ -93,37 +133,35 @@ impl MovieFilter {
                 continue;
             };
 
-            let rating = rating_cache.entry(identity.clone()).or_insert_with(|| {
-                match self.imdb_score(&identity) {
-                    Ok(score) => RatingLookup::Resolved(score),
-                    Err(error) => RatingLookup::Failed(format!("{error:#}")),
+            let lookup = lookup_cache.entry(identity.clone()).or_insert_with(|| {
+                match self.resolve_imdb_movie(&identity) {
+                    Ok(movie) => MovieLookup::Resolved(movie),
+                    Err(error) => MovieLookup::Failed(format!("{error:#}")),
                 }
             });
-            match rating {
-                RatingLookup::Resolved(Some(score)) if *score > self.config.minimum_imdb_score => {
-                    accepted
-                        .entry(candidate.name.clone())
-                        .or_insert_with(|| Release {
-                            name: candidate.name.clone(),
-                            url: candidate.url.clone(),
+            match lookup {
+                MovieLookup::Resolved(Some(movie))
+                    if movie.rating > self.config.minimum_imdb_score =>
+                {
+                    groups
+                        .entry(movie.id.clone())
+                        .or_default()
+                        .push(RatedCandidate {
+                            candidate,
+                            identity,
+                            imdb: movie.clone(),
                         });
-                    if verbose {
-                        eprintln!(
-                            "accepted {}: IMDb {:.1} is above {:.1}",
-                            candidate.name, score, self.config.minimum_imdb_score
-                        );
-                    }
                 }
-                RatingLookup::Resolved(Some(score)) => {
+                MovieLookup::Resolved(Some(movie)) => {
                     outcome.rating_rejections += 1;
                     if verbose {
                         eprintln!(
                             "filtered {}: IMDb {:.1} is not above {:.1}",
-                            candidate.name, score, self.config.minimum_imdb_score
+                            candidate.name, movie.rating, self.config.minimum_imdb_score
                         );
                     }
                 }
-                RatingLookup::Resolved(None) => {
+                MovieLookup::Resolved(None) => {
                     outcome.rating_rejections += 1;
                     if verbose {
                         eprintln!(
@@ -132,7 +170,7 @@ impl MovieFilter {
                         );
                     }
                 }
-                RatingLookup::Failed(error) => {
+                MovieLookup::Failed(error) => {
                     outcome.lookup_failures += 1;
                     if verbose {
                         eprintln!("filtered {}: IMDb lookup failed: {error}", candidate.name);
@@ -141,15 +179,45 @@ impl MovieFilter {
             }
         }
 
-        outcome.releases = accepted.into_values().collect();
+        for (imdb_id, group) in groups {
+            let selected = select_best_candidate(&group);
+            let rank = candidate_rank(selected.candidate);
+            outcome.duplicate_rejections += group.len().saturating_sub(1);
+            if verbose {
+                eprintln!(
+                    "selected {} for IMDb {} from {} TPB variant(s): {}",
+                    selected.candidate.name,
+                    imdb_id,
+                    group.len(),
+                    rank_description(rank, selected.candidate),
+                );
+            }
+            outcome.releases.push(Release {
+                name: selected.candidate.name.clone(),
+                url: selected.candidate.url.clone(),
+                movie_key: selected.identity.movie_key(),
+                imdb_id,
+                imdb_rating: selected.imdb.rating,
+            });
+        }
+
         outcome
     }
 
-    fn imdb_score(&self, identity: &MovieIdentity) -> Result<Option<f64>> {
+    fn resolve_imdb_movie(&self, identity: &MovieIdentity) -> Result<Option<ImdbMovie>> {
         let Some(imdb_id) = self.find_imdb_id(identity)? else {
             return Ok(None);
         };
+        let Some(rating) = self.imdb_score(&imdb_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(ImdbMovie {
+            id: imdb_id,
+            rating,
+        }))
+    }
 
+    fn imdb_score(&self, imdb_id: &str) -> Result<Option<f64>> {
         let mut url = Url::parse(CINEMETA_MOVIE_BASE).expect("valid Cinemeta base URL");
         url.path_segments_mut()
             .expect("Cinemeta base URL accepts path segments")
@@ -204,6 +272,99 @@ fn movie_identity(candidate: &ReleaseCandidate, config: &FilterConfig) -> Option
     Some(MovieIdentity { title, year })
 }
 
+fn select_best_candidate<'group, 'candidate>(
+    group: &'group [RatedCandidate<'candidate>],
+) -> &'group RatedCandidate<'candidate> {
+    group
+        .iter()
+        .max_by_key(|rated| {
+            (
+                candidate_rank(rated.candidate),
+                Reverse(rated.candidate.name.as_str()),
+                Reverse(rated.candidate.url.as_str()),
+            )
+        })
+        .expect("selection group is never empty")
+}
+
+fn candidate_rank(candidate: &ReleaseCandidate) -> CandidateRank {
+    let lowered = candidate.name.to_ascii_lowercase();
+    let words: Vec<_> = lowered.split_whitespace().collect();
+    CandidateRank {
+        has_seeders: u8::from(candidate.seeders.unwrap_or(1) > 0),
+        dolby_vision: u8::from(has_dolby_vision(&words)),
+        source_tier: source_tier(&words),
+        hdr: u8::from(has_any_token(&words, &["hdr", "hdr10", "hlg"])),
+        codec_tier: codec_tier(&words),
+        seeders: candidate.seeders.unwrap_or_default(),
+        leechers: candidate.leechers.unwrap_or_default(),
+        size_bytes: candidate.size_bytes.unwrap_or_default(),
+    }
+}
+
+fn has_dolby_vision(words: &[&str]) -> bool {
+    has_any_token(words, &["dv", "dovi"]) || has_phrase(words, &["dolby", "vision"])
+}
+
+fn source_tier(words: &[&str]) -> u8 {
+    if has_any_token(words, &["remux", "bdremux"]) {
+        4
+    } else if has_any_token(words, &["bluray", "bdrip", "brrip"])
+        || has_phrase(words, &["blu", "ray"])
+    {
+        3
+    } else if has_any_token(words, &["webdl"]) || has_phrase(words, &["web", "dl"]) {
+        2
+    } else if has_any_token(words, &["webrip"]) || has_phrase(words, &["web", "rip"]) {
+        1
+    } else {
+        0
+    }
+}
+
+fn codec_tier(words: &[&str]) -> u8 {
+    if has_any_token(words, &["av1"]) {
+        3
+    } else if has_any_token(words, &["hevc", "x265", "h265"]) || has_phrase(words, &["h", "265"]) {
+        2
+    } else if has_any_token(words, &["x264", "h264"]) || has_phrase(words, &["h", "264"]) {
+        1
+    } else {
+        0
+    }
+}
+
+fn has_any_token(words: &[&str], expected: &[&str]) -> bool {
+    words
+        .iter()
+        .any(|word| expected.iter().any(|token| word == token))
+}
+
+fn has_phrase(words: &[&str], phrase: &[&str]) -> bool {
+    words.windows(phrase.len()).any(|window| window == phrase)
+}
+
+fn rank_description(rank: CandidateRank, candidate: &ReleaseCandidate) -> String {
+    let mut labels = Vec::new();
+    if rank.dolby_vision > 0 {
+        labels.push("Dolby Vision".to_owned());
+    }
+    labels.push(match rank.source_tier {
+        4 => "REMUX".to_owned(),
+        3 => "BluRay".to_owned(),
+        2 => "WEB-DL".to_owned(),
+        1 => "WEBRip".to_owned(),
+        _ => "unknown source".to_owned(),
+    });
+    if rank.hdr > 0 {
+        labels.push("HDR".to_owned());
+    }
+    if let Some(seeders) = candidate.seeders {
+        labels.push(format!("{seeders} seeders"));
+    }
+    labels.join(", ")
+}
+
 fn has_4k_resolution(name: &str) -> bool {
     name.split_whitespace()
         .any(|word| word.eq_ignore_ascii_case("4k") || word.eq_ignore_ascii_case("2160p"))
@@ -247,11 +408,29 @@ mod tests {
         }
     }
 
-    fn candidate(name: &str, size_mib: u64) -> ReleaseCandidate {
+    fn candidate(name: &str, size_mib: u64, seeders: u64) -> ReleaseCandidate {
         ReleaseCandidate {
             name: name.to_owned(),
-            url: "magnet:?example".to_owned(),
+            url: format!("magnet:?{name}"),
             size_bytes: Some(size_mib * MEBIBYTE),
+            seeders: Some(seeders),
+            leechers: Some(1),
+        }
+    }
+
+    fn rated_candidate<'candidate>(
+        candidate: &'candidate ReleaseCandidate,
+    ) -> RatedCandidate<'candidate> {
+        RatedCandidate {
+            candidate,
+            identity: MovieIdentity {
+                title: "Dune Part Two".to_owned(),
+                year: 2025,
+            },
+            imdb: ImdbMovie {
+                id: "tt15239678".to_owned(),
+                rating: 8.4,
+            },
         }
     }
 
@@ -260,7 +439,7 @@ mod tests {
         let filter_config = config();
         assert_eq!(
             movie_identity(
-                &candidate("Dune Part Two 2025 2160p WEB", 501),
+                &candidate("Dune Part Two 2025 2160p WEB", 501, 1),
                 &filter_config
             ),
             Some(MovieIdentity {
@@ -268,24 +447,80 @@ mod tests {
                 year: 2025,
             })
         );
-        assert!(
-            movie_identity(&candidate("Dune Part Two 2025 4K WEB", 501), &filter_config).is_some()
+        assert!(movie_identity(
+            &candidate("Dune Part Two 2025 4K WEB", 501, 1),
+            &filter_config
+        )
+        .is_some());
+        assert!(movie_identity(
+            &candidate("Dune Part Two 2025 1080p WEB", 501, 1),
+            &filter_config
+        )
+        .is_none());
+        assert!(movie_identity(
+            &candidate("Dune Part Two 2024 2160p WEB", 501, 1),
+            &filter_config
+        )
+        .is_none());
+        assert!(movie_identity(
+            &candidate("Dune Part Two 2025 2160p WEB", 500, 1),
+            &filter_config
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn prioritises_dolby_vision_before_source_quality_and_swarm_size() {
+        let dolby_vision = candidate("Dune Part Two 2025 2160p DV WEB DL HEVC", 12_000, 4);
+        let non_dolby_remux = candidate(
+            "Dune Part Two 2025 2160p BluRay REMUX HDR HEVC",
+            60_000,
+            40_000,
         );
-        assert!(movie_identity(
-            &candidate("Dune Part Two 2025 1080p WEB", 501),
-            &filter_config
-        )
-        .is_none());
-        assert!(movie_identity(
-            &candidate("Dune Part Two 2024 2160p WEB", 501),
-            &filter_config
-        )
-        .is_none());
-        assert!(movie_identity(
-            &candidate("Dune Part Two 2025 2160p WEB", 500),
-            &filter_config
-        )
-        .is_none());
+        let group = vec![
+            rated_candidate(&dolby_vision),
+            rated_candidate(&non_dolby_remux),
+        ];
+
+        assert_eq!(
+            select_best_candidate(&group).candidate.name,
+            dolby_vision.name,
+            "Dolby Vision must win even if a non-Dolby variant has a better source tag and more seeders"
+        );
+    }
+
+    #[test]
+    fn does_not_prefer_a_known_dead_dolby_vision_swarm() {
+        let dead_dolby_vision = candidate("Dune Part Two 2025 2160p DV REMUX HEVC", 60_000, 0);
+        let live_non_dolby = candidate("Dune Part Two 2025 2160p WEB DL HEVC", 12_000, 10);
+        let group = vec![
+            rated_candidate(&dead_dolby_vision),
+            rated_candidate(&live_non_dolby),
+        ];
+
+        assert_eq!(
+            select_best_candidate(&group).candidate.name,
+            live_non_dolby.name
+        );
+    }
+
+    #[test]
+    fn uses_seeders_to_choose_equivalent_dolby_vision_variants() {
+        let fewer_seeders = candidate("Dune Part Two 2025 2160p DoVi WEB DL HEVC", 12_000, 10);
+        let more_seeders = candidate(
+            "Dune Part Two 2025 2160p Dolby Vision WEB DL HEVC",
+            12_000,
+            20,
+        );
+        let group = vec![
+            rated_candidate(&fewer_seeders),
+            rated_candidate(&more_seeders),
+        ];
+
+        assert_eq!(
+            select_best_candidate(&group).candidate.name,
+            more_seeders.name
+        );
     }
 
     #[test]
@@ -328,6 +563,64 @@ mod tests {
             title: "Dune Part Two".to_owned(),
             year: 2024,
         };
-        assert!(filter.imdb_score(&identity).unwrap().unwrap() > 6.0);
+        assert!(
+            filter
+                .resolve_imdb_movie(&identity)
+                .unwrap()
+                .unwrap()
+                .rating
+                > 6.0
+        );
+    }
+
+    #[test]
+    #[ignore = "live TPB/IMDb/database integration test; run with cargo test -- --ignored"]
+    fn selects_one_live_tpb_variant_per_imdb_movie() {
+        let client = crate::http::build_http_client(false).unwrap();
+        let sources =
+            vec!["https://tpb.party/search/dune%20part%20two%202024%202160p/1/99/0".to_owned()];
+        let candidates = crate::feed::scan_sources(&client, &sources, false).unwrap();
+        let filter = MovieFilter::new(
+            FilterConfig {
+                years: [2024].into_iter().collect(),
+                minimum_torrent_size_bytes: 500 * MEBIBYTE,
+                minimum_imdb_score: 6.0,
+            },
+            client,
+        );
+        let outcome = filter.filter(&candidates, false);
+        let dune_releases: Vec<_> = outcome
+            .releases
+            .iter()
+            .filter(|release| release.imdb_id == "tt15239678")
+            .collect();
+        assert_eq!(
+            dune_releases.len(),
+            1,
+            "every matching TPB Dune: Part Two variant must collapse to one selection"
+        );
+        let selected_name = dune_releases[0].name.to_ascii_lowercase();
+        let selected_words: Vec<_> = selected_name.split_whitespace().collect();
+        assert!(
+            has_dolby_vision(&selected_words),
+            "the live search contains Dolby Vision variants, so the selected release must be Dolby Vision"
+        );
+        assert!(
+            outcome.duplicate_rejections > 0,
+            "the live query should contain multiple qualifying Dune: Part Two variants"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("movies.db");
+        let mut database = crate::db::open_database(&database_path).unwrap();
+        crate::db::record_releases(&mut database, &outcome.releases, "baseline").unwrap();
+        let stored_dune_count: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM movies WHERE imdb_id = 'tt15239678'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_dune_count, 1);
     }
 }

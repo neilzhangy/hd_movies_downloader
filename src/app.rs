@@ -107,9 +107,10 @@ fn scan_once(cli: &Cli) -> Result<()> {
     let filter_outcome = filter.filter(&candidates, cli.verbose);
     let releases = filter_outcome.releases;
     println!(
-        "scanned {} torrent candidate(s); {} passed filters ({} basic rejection(s), {} IMDb-score rejection(s), {} IMDb lookup failure(s))",
+        "scanned {} torrent candidate(s); selected {} unique movie(s) ({} duplicate variant(s) collapsed, {} basic rejection(s), {} IMDb-score rejection(s), {} IMDb lookup failure(s))",
         candidates.len(),
         releases.len(),
+        filter_outcome.duplicate_rejections,
         filter_outcome.basic_rejections,
         filter_outcome.rating_rejections,
         filter_outcome.lookup_failures,
@@ -120,7 +121,7 @@ fn scan_once(cli: &Cli) -> Result<()> {
         let added = record_releases(&mut database, &releases, "baseline")?;
         export_queue(cli.queue_file.as_deref(), &[])?;
         println!(
-            "initial baseline complete: recorded {} new filtered release(s); no torrents were queued",
+            "initial baseline complete: recorded {} new selected movie(s); no torrents were queued",
             added
         );
         return Ok(());
@@ -130,7 +131,7 @@ fn scan_once(cli: &Cli) -> Result<()> {
     let pending_before_delivery = pending_releases(&database)?;
     export_queue(cli.queue_file.as_deref(), &pending_before_delivery)?;
     println!(
-        "recorded {} new filtered release(s); {} pending queue item(s)",
+        "recorded {} new selected movie(s); {} pending queue item(s)",
         added,
         pending_before_delivery.len()
     );

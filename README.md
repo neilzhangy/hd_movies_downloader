@@ -44,6 +44,8 @@ Before a TPB candidate is recorded in SQLite or sent to Transmission, all of the
 
 The title lookup uses IMDb's public suggestion endpoint to avoid guessing an IMDb ID, then retrieves the score by that ID from a public metadata endpoint. An ambiguous title, a missing rating, or a lookup failure is rejected rather than queued. `--year` can replace the default two-year window when needed.
 
+Eligible TPB variants are then grouped by their exact IMDb movie ID. Only one torrent is retained for each movie: known dead swarms lose to live ones, then Dolby Vision (`DV`, `DoVi`, or `Dolby Vision`) is preferred, followed by source tier (`REMUX`, BluRay, WEB-DL, WEBRip), HDR, codec, seeders, leechers, and size. This means a Dolby Vision 4K variant is chosen ahead of an otherwise better non-Dolby variant, while a reported zero-seeder torrent is never preferred over a live swarm. The selected row stores its canonical title/year key, IMDb ID, and IMDb rating, so later scans do not queue a different TPB filename for the same film.
+
 ## Build and install
 
 Build on the target FreeBSD version and architecture when possible:
@@ -105,7 +107,7 @@ This calls only Transmission's read-only `session-get` method and creates neithe
 
 ## First migration
 
-To retain the Python scanner's history, copy its `movies.db` into `/var/db/hd-movies/movies.db`. Version 3.0 automatically adds its state columns to the legacy `MOVIES(name, url)` table and marks existing rows as already queued, preventing historical releases from being added again.
+To retain the Python scanner's history, copy its `movies.db` into `/var/db/hd-movies/movies.db`. Version 3.0 automatically adds its state columns to the legacy `MOVIES(name, url)` table and marks existing rows as already queued, preventing historical releases from being added again. The current schema also records a best-effort canonical title/year key for old rows; this prevents a later selected TPB variant of the same recognizable movie from being queued again. Newly selected rows additionally retain their exact IMDb ID and rating.
 
 If no old database is available, establish a baseline once:
 
@@ -140,7 +142,7 @@ Other useful commands:
 # Scan and update SQLite without RPC submission or file organization.
 /usr/local/sbin/hd-movies --once --no-transmission
 
-# Print status, first-seen time, attempts, queue time, last error, title, and URL.
+# Print status, first-seen time, attempts, queue time, last error, IMDb ID/rating, title, and URL.
 /usr/local/sbin/hd-movies --print-db
 
 # Export pending rows in the old alternating title/URL text layout.
@@ -166,7 +168,7 @@ The destination folder is never overwritten. A collision leaves the original tor
 cargo test
 ```
 
-The live parser and IMDb-rating checks are deliberately opt-in because they require external services:
+The live parser, IMDb-rating, and TPB/IMDb/SQLite deduplication checks are deliberately opt-in because they require external services:
 
 ```sh
 cargo test -- --ignored
