@@ -319,7 +319,7 @@ pub fn normalise_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::build_http_client;
+    use crate::http::build_remote_http_client;
 
     #[test]
     fn normalises_legacy_style_names() {
@@ -329,7 +329,8 @@ mod tests {
     #[test]
     #[ignore = "live integration test against tpb.party; run with cargo test -- --ignored"]
     fn parses_real_tpb_party_pages() {
-        let client = build_http_client(false).unwrap();
+        let proxy = std::env::var("HD_MOVIES_PROXY").ok();
+        let client = build_remote_http_client(false, proxy.as_deref()).unwrap();
         for source in DEFAULT_SOURCES {
             let page = fetch_source(&client, source).unwrap();
             let candidates = parse_candidates(&page, source);

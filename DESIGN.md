@@ -2,7 +2,7 @@
 
 ## Scope and placement
 
-Version 3.0 runs in the same jail as Transmission. This is intentional: it needs local access to the download root in order to produce a clean library folder after a torrent completes. It talks to the local Transmission RPC endpoint using only an IP address and port; no username or password is supported or needed for the stated setup.
+Version 3.0 runs in the same jail as Transmission. This is intentional: it needs local access to the download root in order to produce a clean library folder after a torrent completes. It talks to the local Transmission RPC endpoint using only an IP address and port; no username or password is supported or needed for the stated setup. An optional `HD_MOVIES_PROXY` routes only remote TPB/IMDb/rating metadata requests through an HTTP(S) or SOCKS proxy. Transmission RPC and all actual torrent tracker/peer traffic remain direct and are not changed by this service.
 
 The service does not search for, download, unpack, or otherwise acquire subtitles. It preserves subtitle files that are already present in a completed torrent alongside the selected movie file.
 
@@ -85,7 +85,7 @@ Legacy Python databases are migrated in place: missing state columns are added, 
 
 ## Transmission contract
 
-The endpoint is constructed as:
+The endpoint is constructed as a direct connection, independent of `HD_MOVIES_PROXY`:
 
 ```text
 http://<transmission-ip>:<transmission-port>/transmission/rpc
@@ -119,4 +119,4 @@ Build for the target FreeBSD architecture, deploy the release binary, and instal
 
 ## Tests
 
-Unit tests cover title normalization, TPB size/swarm parsing, Dolby Vision selection, IMDb response parsing, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. Ignored live integration tests fetch both current default TPB pages, resolve a known IMDb score, and verify that a real multi-variant TPB search results in one selected IMDb movie row. Run them explicitly with `cargo test -- --ignored`.
+Unit tests cover title normalization, TPB size/swarm parsing, Dolby Vision selection, proxy routing, IMDb response parsing, SQLite migration/state, RPC endpoint construction, and movie/subtitle output naming. Ignored live integration tests fetch both current default TPB pages, resolve a known IMDb score, and verify that a real multi-variant TPB search results in one selected IMDb movie row. They honor `HD_MOVIES_PROXY`, so run `HD_MOVIES_PROXY=socks5://127.0.0.1:1080 cargo test -- --ignored` when the external sites require a proxy.

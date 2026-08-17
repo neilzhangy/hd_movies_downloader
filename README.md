@@ -80,6 +80,10 @@ HD_MOVIES_INTERVAL_SECONDS=21600
 HD_MOVIES_TRANSMISSION_IP=127.0.0.1
 HD_MOVIES_TRANSMISSION_PORT=9999
 
+# Optional: route only TPB, IMDb, and rating-metadata requests through this proxy.
+# HTTP(S) proxies and socks5:// URLs are supported. Transmission stays direct.
+# HD_MOVIES_PROXY=socks5://127.0.0.1:1080
+
 # Both paths must exist inside this jail and must be separate.
 HD_MOVIES_DOWNLOAD_DIR=/mnt/downloads/movies
 HD_MOVIES_LIBRARY_DIR=/mnt/media/movies
@@ -95,7 +99,9 @@ HD_MOVIES_LIBRARY_DIR=/mnt/media/movies
 # HD_MOVIES_SOURCE='https://tpb.party/top/207,https://tpb.party/browse/207/1/7/0'
 ```
 
-The client uses the standard unauthenticated endpoint `http://IP:PORT/transmission/rpc`. Verify it before enabling the service:
+`HD_MOVIES_PROXY` is used exclusively for the service's remote TPB, IMDb, and rating-metadata HTTP requests. It does not configure Transmission RPC, tracker requests, peer traffic, or the actual torrent download; those remain direct under Transmission's own configuration. The proxy URL must include its scheme, for example `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`.
+
+The Transmission client uses the standard unauthenticated endpoint `http://IP:PORT/transmission/rpc` directly, even when a proxy is configured. Verify it before enabling the service:
 
 ```sh
 /usr/local/sbin/hd-movies --check-transmission
@@ -172,4 +178,10 @@ The live parser, IMDb-rating, and TPB/IMDb/SQLite deduplication checks are delib
 
 ```sh
 cargo test -- --ignored
+```
+
+If TPB or IMDb requires a proxy from the build host, use the same explicit setting as the service without exposing it in the test output:
+
+```sh
+HD_MOVIES_PROXY=socks5://127.0.0.1:1080 cargo test -- --ignored
 ```

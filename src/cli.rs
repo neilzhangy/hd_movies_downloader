@@ -72,6 +72,10 @@ pub struct Cli {
     #[arg(long, env = "HD_MOVIES_MINIMUM_IMDB_SCORE", default_value_t = 6.0)]
     pub minimum_imdb_score: f64,
 
+    /// HTTP(S) or SOCKS proxy used only for TPB/IMDb/rating requests. Transmission remains direct.
+    #[arg(long, env = "HD_MOVIES_PROXY", value_name = "URL")]
+    pub proxy: Option<String>,
+
     /// Do not contact Transmission; retain all new releases as pending in SQLite.
     #[arg(long)]
     pub no_transmission: bool,

@@ -13,7 +13,7 @@ use crate::db::{
 };
 use crate::feed::{effective_sources, normalise_name, scan_sources};
 use crate::filter::{FilterConfig, MovieFilter};
-use crate::http::build_http_client;
+use crate::http::{build_http_client, build_remote_http_client};
 use crate::models::Release;
 use crate::organizer::organize_completed;
 use crate::transmission::{transmission_endpoint, TransmissionClient};
@@ -93,7 +93,7 @@ fn scan_once(cli: &Cli) -> Result<()> {
         }
     };
 
-    let http_client = build_http_client(cli.insecure_tls)?;
+    let http_client = build_remote_http_client(cli.insecure_tls, cli.proxy.as_deref())?;
     let sources = effective_sources(&cli.sources);
     let candidates = scan_sources(&http_client, &sources, cli.verbose)?;
     let filter = MovieFilter::new(

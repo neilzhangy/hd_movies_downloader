@@ -434,6 +434,11 @@ mod tests {
         }
     }
 
+    fn live_remote_client() -> reqwest::blocking::Client {
+        let proxy = std::env::var("HD_MOVIES_PROXY").ok();
+        crate::http::build_remote_http_client(false, proxy.as_deref()).unwrap()
+    }
+
     #[test]
     fn requires_size_year_and_4k_or_2160p() {
         let filter_config = config();
@@ -557,7 +562,7 @@ mod tests {
     #[test]
     #[ignore = "live integration test for IMDb title resolution and rating metadata"]
     fn resolves_a_live_imdb_rating() {
-        let client = crate::http::build_http_client(false).unwrap();
+        let client = live_remote_client();
         let filter = MovieFilter::new(config(), client);
         let identity = MovieIdentity {
             title: "Dune Part Two".to_owned(),
@@ -576,7 +581,7 @@ mod tests {
     #[test]
     #[ignore = "live TPB/IMDb/database integration test; run with cargo test -- --ignored"]
     fn selects_one_live_tpb_variant_per_imdb_movie() {
-        let client = crate::http::build_http_client(false).unwrap();
+        let client = live_remote_client();
         let sources =
             vec!["https://tpb.party/search/dune%20part%20two%202024%202160p/1/99/0".to_owned()];
         let candidates = crate::feed::scan_sources(&client, &sources, false).unwrap();

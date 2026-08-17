@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added `--proxy` / `HD_MOVIES_PROXY` support for remote TPB, IMDb, and rating-metadata requests, with HTTP(S) and SOCKS support; Transmission RPC and torrent traffic remain direct.
 - Collapse TPB variants by exact IMDb movie, persist the canonical title/year key plus IMDb rating, and queue only one selected torrent per movie.
 - Parse TPB seeder/leecher counts and rank live variants by Dolby Vision first, then source quality and swarm health; known zero-seeder variants lose to live swarms.
 - Added a live TPB/IMDb/SQLite integration test proving that a multi-variant TPB result stores one canonical movie row.
